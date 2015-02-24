@@ -1,0 +1,312 @@
+#!/bin/bash
+
+if [ "$1" != "create" -a "$1" != "mount" -a "$1" != "umount" -a "$1" != "unmount" ]; then
+	echo "Usage: $0 [create|mount|unmount] <options>" >&2
+	exit 1
+fi
+
+create_usage()
+{	
+	echo "Usage: $0 create [-s [10M|1G|256k] -i encdisk.img -n mapperName -k [keysize default 512] -l [loops default 30,000] -H [hash default sha512] -L [loopback default AUTO] | -h]" >&2
+	exit 1
+}
+
+create_cleanup()
+{
+	LOOPBACK=$1
+	NAME=$2
+	sudo losetup -d $LOOPBACK > /dev/null 2>&1
+	sudo cryptsetup close $NAME > /dev/null 2>&1
+}
+
+create_exit_ok()
+{
+	create_cleanup $1 $2
+	exit 0
+}
+
+create_exit_err()
+{
+	create_cleanup $1 $2
+	exit 1
+}
+
+create()
+{
+	local SIZE=""
+	local NAME=""
+	local IMAGE=""
+	local KEYSIZE=512
+	local LOOPS=30000
+	local HASH=sha512
+	local LOOPBACK="AUTO"
+	
+	local OPTIND flag 
+	
+	trap 'create_exit_ok $LOOPBACK $NAME' SIGINT SIGTERM
+	
+	while getopts s:i:n:k:l:H:L:h flag; do
+		case $flag in
+			s)
+				SIZE=$OPTARG
+				;;
+			i)
+				IMAGE=$OPTARG
+				;;
+			n)
+				NAME=$OPTARG
+				;;
+			k)
+				KEYSIZE=$OPTARG
+				;;
+			l)
+				LOOPS=$OPTARG
+				;;
+			H)
+				HASH=$OPTARG
+				;;
+			L)
+				LOOPBACK=$OPTARG
+				;;
+			?)
+				echo "got flag $flag"
+				create_usage
+				;;
+		esac
+	done
+	
+	if [ -z "$SIZE" -o -z "$IMAGE" -o -z "$NAME" -o -z "$KEYSIZE" -o -z "$LOOPS" -o -z "$HASH" -o -z "$LOOPBACK" ]; then
+		create_usage
+	fi
+	
+	if [ -f "$IMAGE" ]; then
+		echo "File $IMAGE already exists" >&2
+		exit 1
+	fi
+	
+	if [ -d "$NAME" ]; then
+		echo "Directory ./$NAME already exists" >&2
+		exit 1
+	fi
+	
+	echo creating sparse image file
+	dd of=$IMAGE bs=$SIZE count=0 seek=1 > /dev/null 2>&1
+	
+	chmod 600 $IMAGE
+	
+	echo setting up loopback device
+	# setup loopback device
+	if [ "$LOOPBACK" = "AUTO" ]; then
+		LOOPBACK=$(sudo losetup --show -f $IMAGE)
+		echo "Using loopback device $LOOPBACK"
+	else
+		if sudo losetup -a | grep -q $LOOPBACK; then
+			echo "$LOOPBACK already in use" >&2
+		fi
+		sudo losetup $LOOPBACK $IMAGE
+	fi
+	
+	echo Encrypting disk image
+	# setup encryption
+	sudo cryptsetup -y -s $KEYSIZE -h $HASH -i $LOOPS luksFormat $LOOPBACK
+	
+	if [ ! $?  -eq 0 ]; then
+		echo Error encrypting disk image >&2
+		create_exit_err $LOOPBACK $NAME
+	fi
+	
+	echo Unlocking encrypted disk image
+	# open encrypted device
+	sudo cryptsetup luksOpen $LOOPBACK $NAME
+	
+	if [ ! $?  -eq 0 ]; then
+		echo Error unlocking device >&2
+		create_exit_err $LOOPBACK $NAME
+	fi
+	
+	echo Check status of encrypted image
+	# output status
+	sudo cryptsetup status $NAME
+	
+	if [ ! $?  -eq 0 ]; then
+		echo Error creating or unlocking encrypted disk image >&2
+		create_exit_err $LOOPBACK $NAME
+	fi
+	
+	echo Zeroing data on disk image
+	# zero data on device
+	sudo dd if=/dev/zero of=/dev/mapper/$NAME > /dev/null 2>&1
+	
+	echo Formatting disk image
+	# format xfs
+	sudo mkfs.xfs /dev/mapper/$NAME > /dev/null 2>&1
+	
+	echo Creating directory for mountpoint
+	# mkdir for mount
+	mkdir ./$NAME
+	
+	echo Mounting new encrypted disk image
+	# mount
+	echo Mounting /dev/mapper/$NAME on ./$NAME
+	sudo mount -t xfs /dev/mapper/$NAME ./$NAME
+	sudo chown $(id -un):$(id -gn) ./$NAME
+	sudo chmod 700 ./$NAME
+}
+
+umount_usage()
+{
+	echo "Usage: $0 umount -n mapper_name [-p mount_path]" >&2
+	exit 1
+}
+
+_umount()
+{
+	local NAME=""
+	local MOUNT=""
+	local IMAGE=""
+	
+	local OPTIND flag
+	
+	while getopts n:p: flag; do
+		case $flag in
+			n)
+				NAME=$OPTARG
+				;;
+			p)
+				MOUNT=$OPTARG
+				;;
+			?)
+				echo "unknown arg"
+				umount_usage
+				;;
+		esac
+	done
+	
+	if [ -z "$NAME" ]; then
+		umount_usage
+	fi
+	
+	if [ -z "$MOUNT" ]; then
+		MOUNT=$(mount | grep /dev/mapper/$NAME | awk '{print $3}')
+	fi
+	
+	IMAGE=$(sudo cryptsetup status $NAME | grep loop: | awk '{print $2}')
+	LOOPBACK=$(sudo losetup -a | grep "$IMAGE" | cut -f1 -d:)
+	
+	if [ -z "$LOOPBACK" ]; then
+		echo "No loopback devices pointing at $MOUNT" >&2
+		exit 1
+	fi
+	
+	sudo umount $MOUNT
+	sudo losetup -d $LOOPBACK
+	sudo cryptsetup close $NAME
+	rmdir $MOUNT
+}
+
+mount_usage()
+{
+	echo "Usage: $0 mount -i encdisk.img -n mapperName [-p /path/to/mount] [-L /dev/loop0 (default auto)]" >&2
+	exit 1
+}
+
+_mount()
+{
+	local NAME=""
+	local IMAGE=""
+	local MOUNT=""
+	local LOOPBACK="AUTO"
+	local CREATE=0
+	
+	local OPTIND flag
+	
+	while getopts n:i:p:L:Ch flag; do
+		case $flag in
+			n)
+				NAME=$OPTARG
+				;;
+			i)
+				IMAGE=$OPTARG
+				;;
+			p)
+				MOUNT=$OPTARG
+				;;
+			L)
+				LOOPBACK=$OPTARG
+				;;
+			C)
+				CREATE=1
+				;;
+			?)
+				mount_usage
+				;;
+		esac
+	done
+	
+	if [ -z "$NAME" -o -z "$IMAGE" ]; then
+		mount_usage
+	fi
+	
+	if [ -z "$MOUNT" ]; then
+		MOUNT=$NAME
+	fi
+	
+	if [ ! -d "$MOUNT" ]; then
+		if [ $CREATE = 0 ]; then
+			echo "directory $MOUNT does not exist. Pass -C if you want me to create it."
+			exit 1
+		else
+			mkdir -p $MOUNT
+		fi
+	fi
+	
+	if mount | grep -q "$MOUNT"; then
+		echo "$MOUNT already mounted"
+		exit 1
+	fi
+	
+	FULLIMAGE=$(readlink -e $IMAGE)
+	if sudo losetup -a | grep -q $FULLIMAGE; then
+		LOOPBACK=$(sudo losetup -a | grep "$FULLIMAGE" | cut -f1 -d:)
+		echo "Found existing loopback $LOOPBACK pointing at $FULLIMAGE, should I use it?"
+		echo -n "(Y/n): "
+		read RESPONSE
+		RESPONSE=${RESPONSE:-Y}
+		if [ "$RESPONSE" != "Y" ]; then
+			exit 0
+		fi
+	else
+		# setup loopback device
+		if [ "$LOOPBACK" = "AUTO" ]; then
+			LOOPBACK=$(sudo losetup --show -f $IMAGE)
+		else
+			if sudo losetup -a | grep -q $LOOPBACK; then
+				echo "$LOOPBACK already in use" >&2
+			fi
+			sudo losetup $LOOPBACK $IMAGE
+		fi
+	fi
+	
+	sudo cryptsetup --type luks open $LOOPBACK $NAME 2>&1 > /dev/null
+	echo Mounting /dev/mapper/$NAME on $MOUNT
+	sudo mount -t xfs /dev/mapper/$NAME $MOUNT
+	sudo chown $(id -un):$(id -gn) $MOUNT
+	sudo chmod 700 $MOUNT
+}
+
+
+case $1 in
+	create)
+		shift 
+		create $@
+		;;
+	mount)
+		shift 
+		_mount $@
+		;;
+	umount|unmount)
+		shift 
+		_umount $@
+		;;
+esac
+
