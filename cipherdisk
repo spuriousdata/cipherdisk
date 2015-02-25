@@ -1,13 +1,37 @@
 #!/bin/bash
 
-if [ "$1" != "create" -a "$1" != "mount" -a "$1" != "umount" -a "$1" != "unmount" ]; then
-	echo "Usage: $0 [create|mount|unmount] <options>" >&2
+stderr()
+{
+	echo $1 >&2
+}
+
+if [ "$1" != "create" -a "$1" != "mount" -a "$1" != "umount" -a "$1" != "unmount" -a "$1" != "status" ]; then
+	stderr "Usage: $0 [create|mount|umount|status] <options>"
 	exit 1
 fi
 
+
+get_luks_devices()
+{
+	local LUKS
+	local i=0
+	for dm in /dev/mapper/*; do
+		if [ "$dm" = "/dev/mapper/control" ]; then
+			continue
+		fi
+		out=$(sudo cryptsetup status $dm)
+		if [ $? -ne 0 ]; then
+			continue
+		fi
+		LUKS[$i]=$dm
+		let i+=1
+	done
+	echo ${LUKS[*]}
+}
+
 create_usage()
 {	
-	echo "Usage: $0 create [-s [10M|1G|256k] -i encdisk.img -n mapperName -k [keysize default 512] -H [hash default sha512] -L [loopback default AUTO] | -h]" >&2
+	stderr "Usage: $0 create [-s [10M|1G|256k] -i encdisk.img -n mapperName -k [keysize default 512] -H [hash default sha512] -L [loopback default AUTO] | -h]"
 	exit 1
 }
 
@@ -76,12 +100,12 @@ create()
 	fi
 	
 	if [ -f "$IMAGE" ]; then
-		echo "File $IMAGE already exists" >&2
+		stderr "File $IMAGE already exists"
 		exit 1
 	fi
 	
 	if [ -d "$NAME" ]; then
-		echo "Directory ./$NAME already exists" >&2
+		stderr "Directory ./$NAME already exists"
 		exit 1
 	fi
 	
@@ -97,7 +121,7 @@ create()
 		echo "Using loopback device $LOOPBACK"
 	else
 		if sudo losetup -a | grep -q $LOOPBACK; then
-			echo "$LOOPBACK already in use" >&2
+			stderr "$LOOPBACK already in use"
 		fi
 		sudo losetup $LOOPBACK $IMAGE
 	fi
@@ -107,7 +131,7 @@ create()
 	sudo cryptsetup -y -s $KEYSIZE -h $HASH luksFormat $LOOPBACK
 	
 	if [ ! $?  -eq 0 ]; then
-		echo Error encrypting disk image >&2
+		stderr "Error encrypting disk image"
 		create_exit_err $LOOPBACK $NAME
 	fi
 	
@@ -116,7 +140,7 @@ create()
 	sudo cryptsetup luksOpen $LOOPBACK $NAME
 	
 	if [ ! $?  -eq 0 ]; then
-		echo Error unlocking device >&2
+		stderr "Error unlocking device"
 		create_exit_err $LOOPBACK $NAME
 	fi
 	
@@ -125,7 +149,7 @@ create()
 	sudo cryptsetup status $NAME
 	
 	if [ ! $?  -eq 0 ]; then
-		echo Error creating or unlocking encrypted disk image >&2
+		stderr "Error creating or unlocking encrypted disk image"
 		create_exit_err $LOOPBACK $NAME
 	fi
 	
@@ -151,7 +175,7 @@ create()
 
 umount_usage()
 {
-	echo "Usage: $0 umount -n mapper_name [-p mount_path]" >&2
+	stderr "Usage: $0 umount -n mapper_name [-p mount_path]"
 	exit 1
 }
 
@@ -190,7 +214,7 @@ _umount()
 	LOOPBACK=$(sudo losetup -a | grep "$IMAGE" | cut -f1 -d:)
 	
 	if [ -z "$LOOPBACK" ]; then
-		echo "No loopback devices pointing at $MOUNT" >&2
+		stderr "No loopback devices pointing at $MOUNT"
 		exit 1
 	fi
 	
@@ -202,7 +226,7 @@ _umount()
 
 mount_usage()
 {
-	echo "Usage: $0 mount -i encdisk.img -n mapperName [-p /path/to/mount] [-L /dev/loop0 (default auto)]" >&2
+	stderr "Usage: $0 mount -i encdisk.img -n mapperName [-p /path/to/mount] [-L /dev/loop0 (default auto)]"
 	exit 1
 }
 
@@ -277,7 +301,7 @@ _mount()
 			LOOPBACK=$(sudo losetup --show -f $IMAGE)
 		else
 			if sudo losetup -a | grep -q $LOOPBACK; then
-				echo "$LOOPBACK already in use" >&2
+				stderr "$LOOPBACK already in use"
 			fi
 			sudo losetup $LOOPBACK $IMAGE
 		fi
@@ -290,6 +314,49 @@ _mount()
 	sudo chmod 700 $MOUNT
 }
 
+status_usage()
+{
+	echo "Usage: $0 <-n name>"
+	exit 0
+}
+
+
+_status()
+{
+	local NAME=""
+	local OPTIND flag
+	
+	while getopts n:h flag; do
+		case $flag in
+			n)
+				NAME=$OPTARG
+				;;
+			?)
+				status_usage
+				;;
+		esac
+	done
+	
+	if [ ! -z "$NAME" ]; then
+		IMG=$(sudo cryptsetup status $NAME | awk '/loop:/ {print $2}')
+		MOUNT=$(mount | grep /dev/mapper/$NAME | awk '{print $3}')
+		echo "$IMG mapped to /dev/mapper/$NAME and mounted on $MOUNT"
+		exit $?
+	fi
+	
+	for dm in $(get_luks_devices); do
+		if [ "$dm" = "/dev/mapper/control" ]; then
+			continue
+		fi
+		out=$(sudo cryptsetup status $dm)
+		if [ $? -ne 0 ]; then
+			continue
+		fi
+		IMG=$(echo "$out" | awk '/loop:/ {print $2}')
+		MOUNT=$(mount | grep $dm | awk '{print $3}')
+		echo "$IMG mapped to $dm and mounted on $MOUNT"
+	done
+}
 
 case $1 in
 	create)
@@ -303,6 +370,10 @@ case $1 in
 	umount|unmount)
 		shift 
 		_umount $@
+		;;
+	status)
+		shift
+		_status $@
 		;;
 esac
 
