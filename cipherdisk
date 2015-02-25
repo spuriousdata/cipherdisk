@@ -7,7 +7,7 @@ fi
 
 create_usage()
 {	
-	echo "Usage: $0 create [-s [10M|1G|256k] -i encdisk.img -n mapperName -k [keysize default 512] -l [loops default 30,000] -H [hash default sha512] -L [loopback default AUTO] | -h]" >&2
+	echo "Usage: $0 create [-s [10M|1G|256k] -i encdisk.img -n mapperName -k [keysize default 512] -H [hash default sha512] -L [loopback default AUTO] | -h]" >&2
 	exit 1
 }
 
@@ -37,7 +37,6 @@ create()
 	local NAME=""
 	local IMAGE=""
 	local KEYSIZE=512
-	local LOOPS=30000
 	local HASH=sha512
 	local LOOPBACK="AUTO"
 	
@@ -59,9 +58,6 @@ create()
 			k)
 				KEYSIZE=$OPTARG
 				;;
-			l)
-				LOOPS=$OPTARG
-				;;
 			H)
 				HASH=$OPTARG
 				;;
@@ -75,7 +71,7 @@ create()
 		esac
 	done
 	
-	if [ -z "$SIZE" -o -z "$IMAGE" -o -z "$NAME" -o -z "$KEYSIZE" -o -z "$LOOPS" -o -z "$HASH" -o -z "$LOOPBACK" ]; then
+	if [ -z "$SIZE" -o -z "$IMAGE" -o -z "$NAME" -o -z "$KEYSIZE" -o -z "$HASH" -o -z "$LOOPBACK" ]; then
 		create_usage
 	fi
 	
@@ -108,7 +104,7 @@ create()
 	
 	echo Encrypting disk image
 	# setup encryption
-	sudo cryptsetup -y -s $KEYSIZE -h $HASH -i $LOOPS luksFormat $LOOPBACK
+	sudo cryptsetup -y -s $KEYSIZE -h $HASH luksFormat $LOOPBACK
 	
 	if [ ! $?  -eq 0 ]; then
 		echo Error encrypting disk image >&2
